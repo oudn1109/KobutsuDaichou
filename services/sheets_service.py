@@ -256,6 +256,118 @@ class SheetsService:
         except Exception as e:
             return False, f"ローカルモックCSVへの保存に失敗しました: {e}"
 
+    def batch_update_sales(self, updates: List[Dict[str, Any]]) -> Tuple[bool, str]:
+        """
+        メルカリ販売履歴CSVの突合結果に基づき、inventory シートの該当行を一括更新（払出消込）します。
+        各 update 要素の形式:
+        {
+            "item_id": "#222",
+            "status": "販売済",
+            "sales_date": "2026/11/14",
+            "sales_price": 12000,
+            "platform_fee": 1200,
+            "shipping_cost": 750,
+            "net_profit": 4550
+        }
+        """
+        if not updates:
+            return False, "更新対象のデータがありません。"
+
+        update_map: Dict[str, Dict[str, Any]] = {}
+        for u in updates:
+            raw_id = str(u.get("item_id", "")).strip().upper()
+            if not raw_id:
+                continue
+            if not raw_id.startswith("#"):
+                raw_id = "#" + raw_id
+            update_map[raw_id] = u
+
+        if not update_map:
+            return False, "有効な管理番号を含む更新データがありません。"
+
+        if self.is_connected and self.spreadsheet:
+            try:
+                ws = self.spreadsheet.worksheet("inventory")
+                all_values = ws.get_all_values()
+                if not all_values:
+                    return False, "inventory シートが空です。"
+
+                headers = all_values[0]
+                col_idx_map = {col_name: idx for idx, col_name in enumerate(headers)}
+                if "item_id" not in col_idx_map:
+                    return False, "inventory シートに item_id 列が見つかりません。"
+
+                # status (M列=13) 〜 net_profit (R列=18) をバッチ更新
+                batch_payload = []
+                updated_count = 0
+
+                for row_num, row_vals in enumerate(all_values[1:], start=2):
+                    item_id_idx = col_idx_map["item_id"]
+                    cell_id = (
+                        str(row_vals[item_id_idx]).strip().upper()
+                        if item_id_idx < len(row_vals)
+                        else ""
+                    )
+                    if cell_id and not cell_id.startswith("#"):
+                        cell_id = "#" + cell_id
+
+                    if cell_id in update_map:
+                        u = update_map[cell_id]
+                        # M列(13列目: status)〜R列(18列目: net_profit)が標準配置の場合、M{row}:R{row}で一括指定
+                        batch_payload.append(
+                            {
+                                "range": f"M{row_num}:R{row_num}",
+                                "values": [
+                                    [
+                                        u.get("status", "販売済"),
+                                        u.get("sales_date", ""),
+                                        u.get("sales_price", ""),
+                                        u.get("platform_fee", ""),
+                                        u.get("shipping_cost", ""),
+                                        u.get("net_profit", ""),
+                                    ]
+                                ],
+                            }
+                        )
+                        updated_count += 1
+
+                if not batch_payload:
+                    return False, "スプレッドシート上に一致する管理番号が見つかりませんでした。"
+
+                ws.batch_update(batch_payload, value_input_option="USER_ENTERED")
+                return True, f"Googleスプレッドシート（inventory）の {updated_count} 件を販売済に一括更新しました。"
+            except Exception as e:
+                return False, f"Googleスプレッドシートの一括更新に失敗しました: {e}"
+
+        # ローカルモックCSVの更新
+        try:
+            df = self.get_inventory_df()
+            if df.empty:
+                return False, "ローカルの inventory.csv が空です。"
+
+            updated_count = 0
+            for idx, row in df.iterrows():
+                cell_id = str(row.get("item_id", "")).strip().upper()
+                if cell_id and not cell_id.startswith("#"):
+                    cell_id = "#" + cell_id
+                if cell_id in update_map:
+                    u = update_map[cell_id]
+                    df.at[idx, "status"] = str(u.get("status", "販売済"))
+                    df.at[idx, "sales_date"] = str(u.get("sales_date", ""))
+                    df.at[idx, "sales_price"] = str(u.get("sales_price", ""))
+                    df.at[idx, "platform_fee"] = str(u.get("platform_fee", ""))
+                    df.at[idx, "shipping_cost"] = str(u.get("shipping_cost", ""))
+                    df.at[idx, "net_profit"] = str(u.get("net_profit", ""))
+                    updated_count += 1
+
+            if updated_count == 0:
+                return False, "ローカル台帳上に一致する管理番号が見つかりませんでした。"
+
+            df.to_csv(MOCK_DIR / "inventory.csv", index=False, encoding="utf-8-sig")
+            return True, f"ローカル台帳（inventory.csv）の {updated_count} 件を販売済に一括更新しました。"
+        except Exception as e:
+            return False, f"ローカル台帳の更新に失敗しました: {e}"
+
     # =========================================================================
     # シート2: store_master 操作
     # =========================================================================

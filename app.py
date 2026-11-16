@@ -1,13 +1,15 @@
 """
 古物商対応・物販管理Webアプリ（Streamlit）
-視線が上から下へ一直線（I字型）に流れる2ステップ・シンプルUI
-- 普段の出品導線（STEP 1 -> STEP 2）には「テンプレートを選ぶ」「商品説明文出力・台帳記入」だけを配置
-- テンプレートの管理（編集・リネーム / 新規作成 / 削除）は専用ダイアログへ分離し、タブで目的別に明確化
+- タブ1: 📦 仕入・出品登録（I字型2ステップ・定型文管理モーダル・出品文出力＆台帳記入）
+- タブ2: 📊 販売確定・月次集計（メルカリ販売履歴CSV取込・月次集計・MF連携支援・古物台帳一括消込）
 """
 
 import datetime
+import io
 import json
-from typing import Any, Dict, List
+import re
+from typing import Any, Dict, List, Tuple
+import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
@@ -36,30 +38,31 @@ st.markdown(
     }
 
     .block-container {
-        max-width: 660px;
-        padding-top: 2.2rem;
+        max-width: 720px;
+        padding-top: 2rem;
         padding-bottom: 5rem;
     }
 
-    /* 第2階層：STEP 1 / STEP 2 のカード本体（純白カード＋上部ブルーライン） */
+    /* 第2階層：各ステップ・セクションのホワイトカード */
     .st-key-step1_card,
-    .st-key-step2_card {
+    .st-key-step2_card,
+    .st-key-sales_upload_card,
+    .st-key-sales_summary_card,
+    .st-key-sales_mf_card,
+    .st-key-sales_reconcile_card {
         background-color: #ffffff !important;
         border: 1px solid #cbd5e1 !important;
         border-top: 5px solid #2563eb !important;
         border-radius: 12px !important;
-        padding: 1.8rem 2rem !important;
+        padding: 1.7rem 1.9rem !important;
         box-shadow: 0 4px 16px rgba(15, 23, 42, 0.06) !important;
     }
 
     /* 第3階層：カード内の各入力フィールド */
-    .st-key-step1_card div[data-baseweb="input"] > div,
-    .st-key-step1_card div[data-baseweb="select"] > div,
-    .st-key-step1_card div[data-baseweb="textarea"] > div,
-    .st-key-step1_card div[data-testid="stNumberInputContainer"],
-    .st-key-step2_card div[data-baseweb="input"] > div,
-    .st-key-step2_card div[data-baseweb="select"] > div,
-    .st-key-step2_card div[data-baseweb="textarea"] > div {
+    div[data-baseweb="input"] > div,
+    div[data-baseweb="select"] > div,
+    div[data-baseweb="textarea"] > div,
+    div[data-testid="stNumberInputContainer"] {
         background-color: #f8fafc !important;
         border: 1px solid #cbd5e1 !important;
         border-radius: 8px !important;
@@ -92,22 +95,40 @@ st.markdown(
         opacity: 1 !important;
     }
 
+    /* メトリクスカードの装飾 */
+    div[data-testid="stMetric"] {
+        background-color: #f8fafc;
+        border: 1px solid #e2e8f0;
+        border-radius: 8px;
+        padding: 0.7rem 0.9rem;
+    }
+    div[data-testid="stMetricLabel"] p {
+        font-size: 0.78rem !important;
+        font-weight: 700 !important;
+        color: #475569 !important;
+    }
+    div[data-testid="stMetricValue"] {
+        font-size: 1.25rem !important;
+        font-weight: 800 !important;
+        color: #0f172a !important;
+    }
+
     /* ステップ見出し */
     .step-marker {
         display: flex;
         align-items: center;
         gap: 10px;
-        font-size: 1.12rem;
+        font-size: 1.1rem;
         font-weight: 800;
         color: #0f172a;
-        margin-bottom: 1.2rem;
-        padding-bottom: 0.75rem;
+        margin-bottom: 1.1rem;
+        padding-bottom: 0.7rem;
         border-bottom: 1px solid #e2e8f0;
     }
     .step-badge {
         background-color: #2563eb;
         color: #ffffff;
-        font-size: 0.75rem;
+        font-size: 0.74rem;
         font-weight: 800;
         padding: 3px 9px;
         border-radius: 6px;
@@ -116,7 +137,7 @@ st.markdown(
 
     /* ステップ間の余白スペース */
     .step-spacer {
-        height: 2.2rem;
+        height: 1.8rem;
     }
 
     /* ヘッダーのステータス表示 */
@@ -154,26 +175,28 @@ def get_sheets_service() -> SheetsService:
     return st.session_state.sheets_service
 
 
-def render_copy_button(text_to_copy: str) -> None:
+def render_copy_button(text_to_copy: str, button_label: str = "出品文をコピーする", key_suffix: str = "main") -> None:
     """ワンクリックでクリップボードへコピーするボタン"""
     escaped_json = json.dumps(text_to_copy)
+    btn_id = f"copy-btn-{key_suffix}"
+    msg_id = f"copy-msg-{key_suffix}"
     html_code = f"""
     <div style="margin: 2px 0;">
-        <button id="copy-btn" style="
+        <button id="{btn_id}" style="
             width: 100%;
-            padding: 0.65rem 1rem;
+            padding: 0.62rem 1rem;
             background-color: #ffffff;
             color: #0f172a;
             border: 1px solid #cbd5e1;
             border-radius: 0.5rem;
-            font-size: 0.92rem;
+            font-size: 0.9rem;
             font-weight: 700;
             cursor: pointer;
             transition: background-color 0.15s ease;
         " onmouseover="this.style.backgroundColor='#f1f5f9'" onmouseout="this.style.backgroundColor='#ffffff'">
-            出品文をコピーする
+            {button_label}
         </button>
-        <div id="copy-msg" style="
+        <div id="{msg_id}" style="
             font-size: 0.8rem;
             color: #2563eb;
             margin-top: 4px;
@@ -183,8 +206,8 @@ def render_copy_button(text_to_copy: str) -> None:
         "></div>
     </div>
     <script>
-    const btn = document.getElementById('copy-btn');
-    const msg = document.getElementById('copy-msg');
+    const btn = document.getElementById('{btn_id}');
+    const msg = document.getElementById('{msg_id}');
     const text = {escaped_json};
     btn.addEventListener('click', async () => {{
         try {{
@@ -204,7 +227,7 @@ def render_copy_button(text_to_copy: str) -> None:
     }});
     </script>
     """
-    components.html(html_code, height=68)
+    components.html(html_code, height=66)
 
 
 @st.dialog("古物台帳", width="large")
@@ -263,8 +286,7 @@ def open_kobutsu_ledger_dialog(service: SheetsService) -> None:
 @st.dialog("定型文テンプレート管理", width="large")
 def open_template_manager_dialog(service: SheetsService, initial_template_id: str = "") -> None:
     """
-    テンプレートの「編集・リネーム」「新規作成」「削除」という性質の異なる3つの操作を、
-    タブで完全に分離して誤操作なく直感的に行える専用モーダルダイアログ。
+    テンプレートの「編集・リネーム」「新規作成」「削除」をタブで分離した管理モーダル。
     """
     templates_df = service.get_templates_df()
     template_options = {
@@ -582,40 +604,8 @@ def render_bundle_vertical_inputs(stores: List[str], assigned_ids: List[str]) ->
     return items_data
 
 
-def main() -> None:
-    service = get_sheets_service()
-    initialize_session_state(service)
-    sheet_url = service.get_spreadsheet_url()
-
-    # =========================================================================
-    # ヘッダーエリア
-    # =========================================================================
-    h_col1, h_col2, h_col3 = st.columns([2.6, 1.2, 1.2])
-    with h_col1:
-        st.markdown("### 物販・古物台帳管理")
-    with h_col2:
-        if st.button("古物台帳を開く", use_container_width=True):
-            open_kobutsu_ledger_dialog(service)
-    with h_col3:
-        if sheet_url:
-            st.link_button("シート原本", url=sheet_url, use_container_width=True)
-        else:
-            if st.button("再読込", use_container_width=True):
-                st.session_state.sheets_service = SheetsService()
-                st.rerun()
-
-    db_badge = "Sheets連携中" if service.is_connected else "ローカル保存"
-    ai_badge = "Gemini連携中" if get_gemini_api_key() else "自動整形モード"
-    st.markdown(
-        f'<div style="text-align:right; margin-bottom: 1.2rem;">'
-        f'<span class="status-pill">{db_badge}</span><span class="status-pill">{ai_badge}</span>'
-        f"</div>",
-        unsafe_allow_html=True,
-    )
-
-    # =========================================================================
-    # STEP 1: 仕入・商品情報の入力
-    # =========================================================================
+def render_tab1_purchase_and_listing(service: SheetsService) -> None:
+    """タブ1: 仕入・出品登録（既存の2ステップ画面）"""
     with st.container(border=True, key="step1_card"):
         st.markdown(
             '<div class="step-marker"><span class="step-badge">STEP 1</span><span>仕入・商品情報の入力</span></div>',
@@ -639,12 +629,8 @@ def main() -> None:
         else:
             items_data = render_bundle_vertical_inputs(stores, assigned_ids)
 
-    # ステップ間のスペース
     st.markdown('<div class="step-spacer"></div>', unsafe_allow_html=True)
 
-    # =========================================================================
-    # STEP 2: テンプレート選択・商品説明文出力・台帳記入
-    # =========================================================================
     with st.container(border=True, key="step2_card"):
         st.markdown(
             '<div class="step-marker"><span class="step-badge">STEP 2</span><span>テンプレート選択・商品説明文出力・台帳記入</span></div>',
@@ -691,7 +677,6 @@ def main() -> None:
                 open_template_manager_dialog(service, initial_template_id=current_tmpl_id)
 
         st.write("")
-        # ボタン文言を「商品説明文出力・台帳記入」にシンプル化
         if st.button(
             f"商品説明文出力・台帳記入 ({ids_str})",
             type="primary",
@@ -749,13 +734,511 @@ def main() -> None:
         st.session_state.generated_description = edited_description
 
         if edited_description.strip():
-            render_copy_button(edited_description)
+            render_copy_button(edited_description, button_label="出品文をコピーする", key_suffix="listing")
         else:
             st.button(
                 "出品文をコピーする",
                 disabled=True,
                 use_container_width=True,
             )
+
+
+# =============================================================================
+# タブ2: 販売確定・月次集計 ヘルパー関数および描画
+# =============================================================================
+def _to_int(val: Any) -> int:
+    if pd.isna(val):
+        return 0
+    s = re.sub(r"[^\d\-]", "", str(val))
+    if not s or s == "-":
+        return 0
+    try:
+        return int(s)
+    except ValueError:
+        return 0
+
+
+def _extract_item_ids(raw_id_cell: Any) -> List[str]:
+    """
+    CSVの「管理番号」セル（例: '#222', '[#224, #225]', 'A01' 等）から正規化したIDリストを返します。
+    """
+    if pd.isna(raw_id_cell):
+        return []
+    text = str(raw_id_cell).strip().upper()
+    if not text:
+        return []
+
+    found = re.findall(r"#?[0-9A-Z]{3}", text)
+    normalized = []
+    for token in found:
+        clean = token if token.startswith("#") else f"#{token}"
+        if clean not in normalized:
+            normalized.append(clean)
+    return normalized
+
+
+def build_mf_journal_csv(
+    last_date: str,
+    total_sales: int,
+    total_fee: int,
+    total_shipping: int,
+    total_Receivable: int,
+    tx_count: int,
+) -> bytes:
+    """
+    マネーフォワード クラウド確定申告の「仕訳帳」インポート形式に準拠した複合仕訳CSV（UTF-8 BOM付）を生成します。
+    貸方1行目（売上高総額）に対し、借方を複数行（売掛金・支払手数料・荷造運賃）で表現する複合仕訳フォーマットです。
+    """
+    columns = [
+        "取引No",
+        "取引日",
+        "借方勘定科目",
+        "借方補助科目",
+        "借方部門",
+        "借方取引先",
+        "借方税区分",
+        "借方インボイス",
+        "借方金額(円)",
+        "借方税額",
+        "貸方勘定科目",
+        "貸方補助科目",
+        "貸方部門",
+        "貸方取引先",
+        "貸方税区分",
+        "貸方インボイス",
+        "貸方金額(円)",
+        "貸方税額",
+        "摘要",
+        "仕訳メモ",
+        "タグ",
+        "MF仕訳タイプ",
+        "決算整理仕訳",
+    ]
+
+    summary_note = f"メルカリ月次売上集計（計{tx_count}件）"
+    rows = []
+
+    # 1行目: 借方=売掛金（メルカリ残高） / 貸方=売上高（総額）
+    rows.append(
+        [
+            "1",
+            last_date,
+            "売掛金",
+            "メルカリ",
+            "",
+            "",
+            "対象外",
+            "",
+            str(total_Receivable),
+            "0",
+            "売上高",
+            "メルカリ売上",
+            "",
+            "",
+            "課売 10%",
+            "",
+            str(total_sales),
+            "",
+            summary_note,
+            "",
+            "",
+            "",
+            "",
+        ]
+    )
+
+    # 2行目: 借方=支払手数料（メルカリ販売手数料）
+    if total_fee > 0:
+        rows.append(
+            [
+                "1",
+                last_date,
+                "支払手数料",
+                "メルカリ手数料",
+                "",
+                "",
+                "課仕 10%",
+                "",
+                str(total_fee),
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "メルカリ販売手数料 月次合計",
+                "",
+                "",
+                "",
+                "",
+            ]
+        )
+
+    # 3行目: 借方=荷造運賃（確定送料）
+    if total_shipping > 0:
+        rows.append(
+            [
+                "1",
+                last_date,
+                "荷造運賃",
+                "メルカリ便送料",
+                "",
+                "",
+                "課仕 10%",
+                "",
+                str(total_shipping),
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "メルカリ確定送料 月次合計",
+                "",
+                "",
+                "",
+                "",
+            ]
+        )
+
+    df_mf = pd.DataFrame(rows, columns=columns)
+    return df_mf.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+
+
+def reconcile_sales_with_inventory(
+    sales_df: pd.DataFrame, inventory_df: pd.DataFrame
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    アップロードされた販売履歴CSVと inventory シートの item_id を突合し、
+    (A) 台帳消込対象リスト と (B) 台帳外/未採番リスト に分類します。
+    まとめ売り（1行に複数ID [#224, #225] が含まれるケース）にも対応し、
+    2点目以降の重複売上計上を防ぎつつ全対象IDを販売済にします。
+    """
+    inv_map: Dict[str, Dict[str, Any]] = {}
+    if not inventory_df.empty and "item_id" in inventory_df.columns:
+        for _, inv_row in inventory_df.iterrows():
+            raw_id = str(inv_row.get("item_id", "")).strip().upper()
+            if raw_id:
+                norm_id = raw_id if raw_id.startswith("#") else f"#{raw_id}"
+                inv_map[norm_id] = inv_row.to_dict()
+
+    matched_updates: List[Dict[str, Any]] = []
+    unmatched_rows: List[Dict[str, Any]] = []
+
+    for _, s_row in sales_df.iterrows():
+        p_date = str(s_row.get("購入完了日", "")).strip()
+        raw_id_str = str(s_row.get("管理番号", "")).strip()
+        title = str(s_row.get("商品タイトル", "")).strip()
+        price = _to_int(s_row.get("商品価格", 0))
+        fee = _to_int(s_row.get("販売手数料", 0))
+        shipping = _to_int(s_row.get("送料", 0))
+        profit_csv = price - fee - shipping
+
+        extracted_ids = _extract_item_ids(raw_id_str)
+        existing_matched_ids = [eid for eid in extracted_ids if eid in inv_map]
+
+        if not existing_matched_ids:
+            unmatched_rows.append(
+                {
+                    "購入完了日": p_date,
+                    "CSV管理番号": raw_id_str if raw_id_str else "（未記載）",
+                    "商品タイトル": title,
+                    "商品価格": price,
+                    "販売手数料": fee,
+                    "送料": shipping,
+                    "販売利益": profit_csv,
+                }
+            )
+            continue
+
+        # 一致した管理番号ごとに消込データを作成（セット売りの場合は1点目に売上・手数料・送料を計上し、2点目以降は0円で原価のみ差し引く）
+        for idx, item_id in enumerate(existing_matched_ids):
+            inv_item = inv_map[item_id]
+            cost_price = _to_int(inv_item.get("cost_price", 0))
+            allocated_price = price if idx == 0 else 0
+            allocated_fee = fee if idx == 0 else 0
+            allocated_shipping = shipping if idx == 0 else 0
+            net_profit = allocated_price - cost_price - allocated_fee - allocated_shipping
+
+            matched_updates.append(
+                {
+                    "item_id": item_id,
+                    "product_name": str(inv_item.get("product_name", title)),
+                    "csv_title": title,
+                    "current_status": str(inv_item.get("status", "出品中")),
+                    "status": "販売済",
+                    "sales_date": p_date,
+                    "cost_price": cost_price,
+                    "sales_price": allocated_price,
+                    "platform_fee": allocated_fee,
+                    "shipping_cost": allocated_shipping,
+                    "net_profit": net_profit,
+                }
+            )
+
+    return matched_updates, unmatched_rows
+
+
+def render_tab2_sales_and_monthly_summary(service: SheetsService) -> None:
+    """タブ2: 販売確定・月次集計"""
+    with st.container(border=True, key="sales_upload_card"):
+        st.markdown(
+            '<div class="step-marker"><span class="step-badge">STEP 1</span><span>メルカリ販売履歴CSVの読み込み</span></div>',
+            unsafe_allow_html=True,
+        )
+
+        uploaded_file = st.file_uploader(
+            "メルカリ販売履歴CSVファイル（mercari_sales_YYYY_MM.csv）を選択",
+            type=["csv"],
+            key="mercari_sales_csv_uploader",
+        )
+
+    if uploaded_file is None:
+        return
+
+    try:
+        raw_bytes = uploaded_file.getvalue()
+        sales_df = pd.read_csv(io.BytesIO(raw_bytes), encoding="utf-8-sig", dtype=str).fillna("")
+    except Exception as e:
+        st.error(f"CSVファイルの読み込みに失敗しました: {e}")
+        return
+
+    required_cols = ["購入完了日", "管理番号", "商品タイトル", "商品価格", "販売手数料", "送料"]
+    missing_cols = [c for c in required_cols if c not in sales_df.columns]
+    if missing_cols:
+        st.error(f"CSVに必要な列が含まれていません（不足列: {', '.join(missing_cols)}）。")
+        return
+
+    if sales_df.empty:
+        st.warning("アップロードされたCSVに取引データが含まれていません。")
+        return
+
+    # 集計計算
+    tx_count = len(sales_df)
+    total_sales = sum(_to_int(v) for v in sales_df["商品価格"])
+    total_fee = sum(_to_int(v) for v in sales_df["販売手数料"])
+    total_shipping = sum(_to_int(v) for v in sales_df["送料"])
+    total_mercari_profit = total_sales - total_fee - total_shipping
+
+    # 最終取引日の特定（YYYY/MM/DD 形式に統一）
+    valid_dates = [
+        str(d).strip().replace("-", "/")
+        for d in sales_df["購入完了日"].tolist()
+        if str(d).strip()
+    ]
+    last_tx_date = max(valid_dates) if valid_dates else datetime.date.today().strftime("%Y/%m/%d")
+
+    st.markdown('<div class="step-spacer"></div>', unsafe_allow_html=True)
+
+    # =========================================================================
+    # 2. 月次サマリー指標
+    # =========================================================================
+    with st.container(border=True, key="sales_summary_card"):
+        st.markdown(
+            '<div class="step-marker"><span class="step-badge">STEP 2</span><span>月次売上サマリー</span></div>',
+            unsafe_allow_html=True,
+        )
+
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("取引件数", f"{tx_count} 件")
+        m2.metric("売上総額", f"¥{total_sales:,}")
+        m3.metric("販売手数料合計", f"¥{total_fee:,}")
+        m4.metric("確定送料合計", f"¥{total_shipping:,}")
+        m5.metric("メルカリ利益合計", f"¥{total_mercari_profit:,}")
+
+    st.markdown('<div class="step-spacer"></div>', unsafe_allow_html=True)
+
+    # =========================================================================
+    # 3. マネーフォワード（MF）連携支援セクション
+    # =========================================================================
+    with st.container(border=True, key="sales_mf_card"):
+        st.markdown(
+            '<div class="step-marker"><span class="step-badge">STEP 3</span><span>マネーフォワード（MF）連携支援</span></div>',
+            unsafe_allow_html=True,
+        )
+
+        st.markdown("**MF手入力用カード（月末複合仕訳）**")
+        mf_summary_df = pd.DataFrame(
+            [
+                {
+                    "取引日": last_tx_date,
+                    "借方科目": "売掛金（メルカリ残高）",
+                    "借方金額": f"¥{total_mercari_profit:,}",
+                    "貸方科目": "売上高",
+                    "貸方金額": f"¥{total_sales:,}",
+                },
+                {
+                    "取引日": last_tx_date,
+                    "借方科目": "支払手数料",
+                    "借方金額": f"¥{total_fee:,}",
+                    "貸方科目": "-",
+                    "貸方金額": "-",
+                },
+                {
+                    "取引日": last_tx_date,
+                    "借方科目": "荷造運賃",
+                    "借方金額": f"¥{total_shipping:,}",
+                    "貸方科目": "-",
+                    "貸方金額": "-",
+                },
+            ]
+        )
+        st.dataframe(mf_summary_df, use_container_width=True, hide_index=True)
+
+        mf_copy_text = (
+            f"取引日: {last_tx_date}\n"
+            f"売上高（貸方）: {total_sales}\n"
+            f"支払手数料（借方）: {total_fee}\n"
+            f"荷造運賃（借方）: {total_shipping}\n"
+            f"売掛金/メルカリ残高（借方）: {total_mercari_profit}"
+        )
+
+        mf_c1, mf_c2 = st.columns(2)
+        with mf_c1:
+            render_copy_button(
+                mf_copy_text,
+                button_label="MF手入力用の数値をコピーする",
+                key_suffix="mf_copy",
+            )
+        with mf_c2:
+            mf_csv_bytes = build_mf_journal_csv(
+                last_date=last_tx_date,
+                total_sales=total_sales,
+                total_fee=total_fee,
+                total_shipping=total_shipping,
+                total_Receivable=total_mercari_profit,
+                tx_count=tx_count,
+            )
+            st.download_button(
+                label="マネーフォワード仕訳用CSVダウンロード",
+                data=mf_csv_bytes,
+                file_name=f"mf_journal_{last_tx_date.replace('/', '')[:6]}.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+    st.markdown('<div class="step-spacer"></div>', unsafe_allow_html=True)
+
+    # =========================================================================
+    # 4. スプレッドシート（inventory）への払出消込ロジック
+    # =========================================================================
+    with st.container(border=True, key="sales_reconcile_card"):
+        st.markdown(
+            '<div class="step-marker"><span class="step-badge">STEP 4</span><span>古物台帳（inventory）への払出消込</span></div>',
+            unsafe_allow_html=True,
+        )
+
+        inventory_df = service.get_inventory_df()
+        matched_updates, unmatched_rows = reconcile_sales_with_inventory(sales_df, inventory_df)
+
+        # A. 台帳消込対象
+        st.markdown(f"**A. 台帳消込対象（管理番号あり）: {len(matched_updates)} 件**")
+        if matched_updates:
+            preview_matched_df = pd.DataFrame(
+                [
+                    {
+                        "管理番号": u["item_id"],
+                        "商品名": u["product_name"],
+                        "更新ステータス": u["status"],
+                        "販売日": u["sales_date"],
+                        "仕入原価": f"¥{u['cost_price']:,}",
+                        "販売価格": f"¥{u['sales_price']:,}",
+                        "販売手数料": f"¥{u['platform_fee']:,}",
+                        "送料": f"¥{u['shipping_cost']:,}",
+                        "純利益": f"¥{u['net_profit']:,}",
+                    }
+                    for u in matched_updates
+                ]
+            )
+            st.dataframe(preview_matched_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("台帳の item_id と一致する取引はありませんでした。")
+
+        st.write("")
+
+        # B. 台帳外 / 未採番の取引
+        st.markdown(f"**B. 台帳外 / 未採番の取引: {len(unmatched_rows)} 件**")
+        st.caption("※これらは古物台帳の更新はスキップされ、月次売上集計（MF用）にのみ反映されます。")
+        if unmatched_rows:
+            preview_unmatched_df = pd.DataFrame(
+                [
+                    {
+                        "購入完了日": r["購入完了日"],
+                        "管理番号": r["CSV管理番号"],
+                        "商品タイトル": r["商品タイトル"],
+                        "商品価格": f"¥{r['商品価格']:,}",
+                        "販売手数料": f"¥{r['販売手数料']:,}",
+                        "送料": f"¥{r['送料']:,}",
+                        "販売利益": f"¥{r['販売利益']:,}",
+                    }
+                    for r in unmatched_rows
+                ]
+            )
+            st.dataframe(preview_unmatched_df, use_container_width=True, hide_index=True)
+
+        st.write("")
+        if st.button(
+            f"スプレッドシートへ反映して台帳を更新（対象: {len(matched_updates)} 件）",
+            type="primary",
+            disabled=(len(matched_updates) == 0),
+            use_container_width=True,
+        ):
+            with st.spinner("スプレッドシートを一括更新しています..."):
+                ok, msg = service.batch_update_sales(matched_updates)
+                if ok:
+                    st.toast(msg)
+                    st.success(msg)
+                else:
+                    st.error(msg)
+
+
+def main() -> None:
+    service = get_sheets_service()
+    initialize_session_state(service)
+    sheet_url = service.get_spreadsheet_url()
+
+    # =========================================================================
+    # ヘッダーエリア
+    # =========================================================================
+    h_col1, h_col2, h_col3 = st.columns([2.6, 1.2, 1.2])
+    with h_col1:
+        st.markdown("### 物販・古物台帳管理")
+    with h_col2:
+        if st.button("古物台帳を開く", use_container_width=True):
+            open_kobutsu_ledger_dialog(service)
+    with h_col3:
+        if sheet_url:
+            st.link_button("シート原本", url=sheet_url, use_container_width=True)
+        else:
+            if st.button("再読込", use_container_width=True):
+                st.session_state.sheets_service = SheetsService()
+                st.rerun()
+
+    db_badge = "Sheets連携中" if service.is_connected else "ローカル保存"
+    ai_badge = "Gemini連携中" if get_gemini_api_key() else "自動整形モード"
+    st.markdown(
+        f'<div style="text-align:right; margin-bottom: 0.8rem;">'
+        f'<span class="status-pill">{db_badge}</span><span class="status-pill">{ai_badge}</span>'
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+    # =========================================================================
+    # 上部2タブ切り替え
+    # =========================================================================
+    tab_purchase, tab_sales = st.tabs(["📦 仕入・出品登録", "📊 販売確定・月次集計"])
+
+    with tab_purchase:
+        render_tab1_purchase_and_listing(service)
+
+    with tab_sales:
+        render_tab2_sales_and_monthly_summary(service)
 
 
 if __name__ == "__main__":
