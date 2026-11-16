@@ -1,0 +1,13 @@
+# 環境変数・秘密鍵（クラウドにはアップロードせず、Streamlit Cloudの管理画面に設定します）
+.env
+*.json
+.streamlit/secrets.toml
+
+# 関係のない別プロジェクトフォルダを除外
+【PDF-splitters】20260913/
+
+# Pythonキャッシュ
+__pycache__/
+*.py[cod]
+.venv/
+venv/
